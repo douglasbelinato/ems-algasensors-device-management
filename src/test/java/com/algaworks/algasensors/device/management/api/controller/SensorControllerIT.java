@@ -2,10 +2,12 @@ package com.algaworks.algasensors.device.management.api.controller;
 
 import com.algaworks.algasensors.device.management.api.client.SensorMonitoringClient;
 import com.algaworks.algasensors.device.management.api.model.SensorInput;
+import com.algaworks.algasensors.device.management.api.model.SensorMonitoringOuput;
 import com.algaworks.algasensors.device.management.common.IdGenerator;
 import com.algaworks.algasensors.device.management.domain.model.Sensor;
 import com.algaworks.algasensors.device.management.domain.model.SensorId;
 import com.algaworks.algasensors.device.management.domain.repository.SensorRepository;
+import io.hypersistence.tsid.TSID;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Nested;
@@ -20,13 +22,20 @@ import org.springframework.http.MediaType;
 import org.springframework.test.context.bean.override.mockito.MockitoBean;
 import org.springframework.test.web.servlet.client.RestTestClient;
 
+import java.time.OffsetDateTime;
+
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
 
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
 class SensorControllerIT {
 
     private static final String SENSORS_PATH = "/api/sensors";
     private static final String SENSOR_PATH = "/api/sensors/{id}";
+    private static final String SENSOR_DETAIL_PATH = "/api/sensors/{id}/detail";
     private static final String SENSOR_ENABLE_PATH = "/api/sensors/{id}/enable";
 
     @LocalServerPort
@@ -232,6 +241,92 @@ class SensorControllerIT {
                     .expectStatus().isOk()
                     .expectBody()
                     .jsonPath("$.enabled").isEqualTo(expectedState);
+        }
+    }
+
+    @Nested
+    @DisplayName("GET /api/sensors/{id}/detail")
+    class GetDetail {
+
+        @Test
+        @DisplayName("should return 200 aggregating the sensor with its monitoring data")
+        void shouldReturnDetail() {
+            Sensor sensor = persistSensor("Pressure Sensor", "10.0.0.2", "Lab", "HTTP", "PS-200", true);
+
+            TSID monitoringId = IdGenerator.generateTSID();
+            when(sensorMonitoringClient.getDetail(sensor.getId().getValue()))
+                    .thenReturn(SensorMonitoringOuput.builder()
+                            .id(monitoringId)
+                            .enabled(true)
+                            .lastTemperature(36.6)
+                            .updatedAt(OffsetDateTime.parse("2026-01-01T10:00:00Z"))
+                            .build());
+
+            client.get().uri(SENSOR_DETAIL_PATH, idOf(sensor))
+                    .exchange()
+                    .expectStatus().isOk()
+                    .expectBody()
+                    .jsonPath("$.sensor.id").isEqualTo(idOf(sensor))
+                    .jsonPath("$.sensor.name").isEqualTo("Pressure Sensor")
+                    .jsonPath("$.sensor.enabled").isEqualTo(true)
+                    .jsonPath("$.monitoring.id").isEqualTo(monitoringId.toString())
+                    .jsonPath("$.monitoring.enabled").isEqualTo(true)
+                    .jsonPath("$.monitoring.lastTemperature").isEqualTo(36.6);
+
+            verify(sensorMonitoringClient).getDetail(sensor.getId().getValue());
+        }
+
+        @Test
+        @DisplayName("should return 404 and not call the monitoring service when the sensor does not exist")
+        void shouldReturnNotFound() {
+            String missingId = IdGenerator.generateTSID().toString();
+
+            client.get().uri(SENSOR_DETAIL_PATH, missingId)
+                    .exchange()
+                    .expectStatus().isNotFound();
+
+            verify(sensorMonitoringClient, never()).getDetail(any());
+        }
+    }
+
+    @Nested
+    @DisplayName("Monitoring service integration")
+    class MonitoringIntegration {
+
+        @Test
+        @DisplayName("enabling a sensor should request the monitoring service to enable it")
+        void shouldEnableMonitoring() {
+            Sensor sensor = persistSensor("Toggle", "10.0.0.1", "Room", "HTTP", "T-1", false);
+
+            client.put().uri(SENSOR_ENABLE_PATH, idOf(sensor))
+                    .exchange()
+                    .expectStatus().isNoContent();
+
+            verify(sensorMonitoringClient).enableMonitoring(sensor.getId().getValue());
+        }
+
+        @Test
+        @DisplayName("disabling a sensor should request the monitoring service to disable it")
+        void shouldDisableMonitoring() {
+            Sensor sensor = persistSensor("Toggle", "10.0.0.1", "Room", "HTTP", "T-1", true);
+
+            client.delete().uri(SENSOR_ENABLE_PATH, idOf(sensor))
+                    .exchange()
+                    .expectStatus().isNoContent();
+
+            verify(sensorMonitoringClient).disableMonitoring(sensor.getId().getValue());
+        }
+
+        @Test
+        @DisplayName("deleting a sensor should request the monitoring service to disable it")
+        void shouldDisableMonitoringOnDelete() {
+            Sensor sensor = persistSensor("To Delete", "10.0.0.1", "Room", "HTTP", "D-1", true);
+
+            client.delete().uri(SENSOR_PATH, idOf(sensor))
+                    .exchange()
+                    .expectStatus().isNoContent();
+
+            verify(sensorMonitoringClient).disableMonitoring(sensor.getId().getValue());
         }
     }
 
